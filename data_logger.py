@@ -99,19 +99,20 @@ def get_unfulfilled_orders() -> List[Tuple[int, str, str, str]]:
         logger.error(f"Failed to get unfulfilled orders: {e}")
         return []
 
-def get_order_user_id(order_id: int) -> Optional[int]:
+def get_order_info_for_notify(order_id: int) -> Optional[Tuple[int, str]]:
     """
-    Gets the user_id for a given order_id to send them a notification.
+    Gets the user_id and collection_time for a given order_id.
     """
     try:
         conn = sqlite3.connect(DATABASE_FILE)
         c = conn.cursor()
-        c.execute("SELECT user_id FROM orders WHERE order_id = ?", (order_id,))
-        result = c.fetchone()
+        # Select both user_id and their chosen collection_time
+        c.execute("SELECT user_id, collection_time FROM orders WHERE order_id = ?", (order_id,))
+        result = c.fetchone()  # This will be (user_id, '16:15')
         conn.close()
-        return result[0] if result else None
+        return result if result else None
     except sqlite3.Error as e:
-        logger.error(f"Failed to get user_id for order {order_id}: {e}")
+        logger.error(f"Failed to get info for order {order_id}: {e}")
         return None
 
 def mark_order_completed(order_id: int) -> bool:

@@ -20,7 +20,7 @@ from telegram.constants import ParseMode
 from data_logger import (
     log_order, 
     get_unfulfilled_orders, 
-    get_order_user_id, 
+    get_order_info_for_notify,
     mark_order_completed
 )
 from menu_builder import build_menu_message
@@ -516,7 +516,6 @@ class OrderBot:
         """Handles the admin's 'Mark Completed' button press."""
         query = update.callback_query
 
-        # Check if the person clicking is the admin
         if query.from_user.id != self.admin_chat_id:
             await query.answer("This is an admin-only button.", show_alert=True)
             return
@@ -529,19 +528,26 @@ class OrderBot:
             await query.edit_message_text("Error: Invalid order ID in callback.")
             return
 
-        # 1. Get the customer's user_id from the DB
-        user_id_to_notify = get_order_user_id(order_id)
+        # 1. Get the customer's user_id AND their selected time
+        order_info = get_order_info_for_notify(order_id) # <-- Use new function
 
-        if user_id_to_notify:
+        if order_info:
+            user_id_to_notify, user_collection_time = order_info # <-- Unpack both values
+            
             # 2. Mark as completed in the DB
             success = mark_order_completed(order_id)
 
             if success:
-                # 3. Get the collection time
-                collection_time = context.bot_data.get(
-                    'collection_time', 
-                    'Ready for collection now. Please check with us for timing.'
-                )
+                # 3. Determine the collection message (THIS IS THE NEW LOGIC)
+                if user_collection_time:
+                    # Use the specific time the user selected
+                    collection_message = f"Your selected time: **{user_collection_time}**\nCollect at 08-12 Suite!"
+                else:
+                    # Fallback to the generic message from /set_time
+                    collection_message = context.bot_data.get(
+                        'collection_time', 
+                        'Ready for collection now. Please check with us for timing.'
+                    )
 
                 # 4. Notify the user
                 try:
@@ -549,7 +555,7 @@ class OrderBot:
                         chat_id=user_id_to_notify,
                         text=(
                             "🎉 Your order is ready for collection!\n\n"
-                            f"**Collection Info:**\n{collection_time}"
+                            f"**Collection Info:**\n{collection_message}" # <-- Use dynamic message
                         ),
                         parse_mode=ParseMode.MARKDOWN
                     )
