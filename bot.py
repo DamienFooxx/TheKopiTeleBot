@@ -88,6 +88,8 @@ class OrderBot:
                 self.STATE_SCREENSHOT: [MessageHandler(filters.PHOTO, self.get_screenshot)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
+            allow_reentry=True,          # Allows /start to reset the conversation at any point
+            conversation_timeout=3600,   # 1 hour timeout
         )
 
         # Handler for the admin's buttons
@@ -185,43 +187,55 @@ class OrderBot:
             return self.STATE_MENU_SELECTION
 
         elif data == "done_ordering":
-            # --- THIS IS THE NEW LOGIC ---
-            # 1. Get the order window from bot data
-            start_time = context.bot_data.get('order_window_start')
-            end_time = context.bot_data.get('order_window_end')
+            # --- UPDATED LOGIC FOR MULTIPLE WINDOWS ---
+            # 1. Get the order windows (list of tuples)
+            windows = context.bot_data.get('order_windows')
             
-            if not start_time or not end_time:
+            # Backward compatibility: check if old single variables exist if list doesn't
+            if not windows:
+                start = context.bot_data.get('order_window_start')
+                end = context.bot_data.get('order_window_end')
+                if start and end:
+                    windows = [(start, end)]
+
+            if not windows:
                 await context.bot.send_message(
                     chat_id=query.from_user.id,
-                    text="Apologies, we are not accepting new orders at this time. Please try again later."
+                    text="Apologies, we are not accepting new orders at this time (No time slots configured)."
                 )
                 return ConversationHandler.END
 
-            # 2. Generate time slots
-            slots = generate_time_slots(start_time, end_time)
+            # 2. Generate time slots for ALL windows
+            all_slots = []
+            for start_time, end_time in windows:
+                # Use existing helper function
+                slots = generate_time_slots(start_time, end_time) 
+                all_slots.extend(slots)
             
-            if not slots:
+            # Remove duplicates (if ranges overlap) and sort them
+            all_slots = sorted(list(set(all_slots)))
+            
+            if not all_slots:
                 await context.bot.send_message(
                     chat_id=query.from_user.id,
-                    text=f"Sorry, all collection slots for today (between {start_time} and {end_time}) have passed. Please try again tomorrow."
+                    text="Sorry, all collection slots for today have passed. Please try again tomorrow."
                 )
                 return ConversationHandler.END
             
             # 3. Build keyboard for time slots
             keyboard = []
-            # Create rows of 3 buttons
             row = []
-            for slot in slots:
+            for slot in all_slots:
                 row.append(InlineKeyboardButton(slot, callback_data=f"slot_{slot}"))
                 if len(row) == 3:
                     keyboard.append(row)
                     row = []
-            if row: # Add any remaining buttons
+            if row: 
                 keyboard.append(row)
                 
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # 4. Store final order details (from your old code)
+            # 4. Store final order details (unchanged)
             order_details = ""
             total_price = 0
             for item_id, quantity in cart.items():
@@ -236,10 +250,10 @@ class OrderBot:
             await query.edit_message_text(
                 "Great! Your order is confirmed.\n\n"
                 "**Please select a collection time:**",
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
             )
             
-            # 6. Transition to the new time selection state
             return self.STATE_TIME_SELECTION
 
     async def time_slot_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -423,40 +437,55 @@ class OrderBot:
             scope=BotCommandScopeChat(chat_id=self.admin_chat_id)
         )
         logger.info("Custom bot commands set for users and admin.")
-
+    
+    # --- NEW Admin Methods for /set_order_window ---
     async def start_set_order_window(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Asks the admin to enter the order window."""
         await update.message.reply_text(
-            "Please enter the new order window in 24H format (e.g., 16:00-18:00)\n"
-            "This will generate 15-min slots for users.\n\n"
+            "Please enter the order windows in 24H format, separated by commas.\n"
+            "Example: 10:00-13:00, 15:00-18:00\n\n"
             "Or /cancel to stop."
         )
         return self.STATE_SET_ORDER_WINDOW_ENTRY
 
     async def receive_order_window(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Saves the new order window start and end times."""
+        """Saves the new order windows."""
         try:
-            time_range = update.message.text
-            start_str, end_str = time_range.split('-')
+            text = update.message.text
+            # Split by comma to get multiple ranges
+            ranges_raw = text.split(',')
+            valid_ranges = []
+
+            for r in ranges_raw:
+                # Clean up whitespace
+                r = r.strip()
+                start_str, end_str = r.split('-')
+                
+                # Validate the format for both times
+                datetime.datetime.strptime(start_str.strip(), "%H:%M")
+                datetime.datetime.strptime(end_str.strip(), "%H:%M")
+                
+                valid_ranges.append((start_str.strip(), end_str.strip()))
             
-            # Validate the format
-            datetime.datetime.strptime(start_str.strip(), "%H:%M")
-            datetime.datetime.strptime(end_str.strip(), "%H:%M")
+            # Store the list of ranges
+            context.bot_data['order_windows'] = valid_ranges
             
-            context.bot_data['order_window_start'] = start_str.strip()
-            context.bot_data['order_window_end'] = end_str.strip()
+            # Create a readable confirmation string
+            readable_ranges = ", ".join([f"{s}-{e}" for s, e in valid_ranges])
             
             await update.message.reply_text(
-                f"✅ Order window updated. Users can now select slots between {start_str} and {end_str}."
+                f"✅ Order windows updated.\nUsers can now select slots between:\n{readable_ranges}"
             )
             return ConversationHandler.END
+            
         except Exception as e:
             logger.error(f"Failed to parse order window: {e}")
             await update.message.reply_text(
-                "Invalid format. Please use HH:MM-HH:MM (e.g., 16:00-18:00).\n"
+                "Invalid format. Please use HH:MM-HH:MM, separated by commas.\n"
+                "Example: 10:00-13:00, 16:00-18:00\n"
                 "Please try again or send /cancel."
             )
-            return self.STATE_SET_ORDER_WINDOW_ENTRY # Ask again
+            return self.STATE_SET_ORDER_WINDOW_ENTRY
         
 
     async def start_set_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
