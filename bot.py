@@ -63,9 +63,8 @@ class OrderBot:
         STATE_MENU_SELECTION,
         STATE_TIME_SELECTION,
         STATE_SCREENSHOT,
-        STATE_SET_TIME_ENTRY,
         STATE_SET_ORDER_WINDOW_ENTRY
-    ) = range(6)
+    ) = range(5)
 
     def __init__(self, token: str):
         """Initializes the bot with its token and admin ID."""
@@ -97,16 +96,6 @@ class OrderBot:
         
         self.application.add_handler(conv_handler)
         self.application.add_handler(approval_handler)
-        
-        # --- (Handler for /set_time remains the same) ---
-        set_time_handler = ConversationHandler(
-            entry_points=[CommandHandler("set_time", self.start_set_time, filters=self.admin_filter)],
-            states={
-                self.STATE_SET_TIME_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.receive_collection_time)],
-            },
-            fallbacks=[CommandHandler("cancel", self.cancel_admin_action)],
-        )
-        self.application.add_handler(set_time_handler)
         
         # --- 5. ADD NEW HANDLER for /set_order_window ---
         set_window_handler = ConversationHandler(
@@ -427,7 +416,6 @@ class OrderBot:
         # --- 3. Define commands for the admin (includes all user commands) ---
         admin_commands = user_commands + [
             BotCommand("orders", "View unfulfilled orders"),
-            BotCommand("set_time", "Set the 'order ready' message"),
             BotCommand("set_order_window", "Set 15-min collection slots (e.g., 16:00-18:00)"),
         ]
         
@@ -567,16 +555,12 @@ class OrderBot:
             success = mark_order_completed(order_id)
 
             if success:
-                # 3. Determine the collection message (THIS IS THE NEW LOGIC)
+                # --- UPDATED LOGIC ---
                 if user_collection_time:
-                    # Use the specific time the user selected
                     collection_message = f"Your selected time: **{user_collection_time}**\nCollect at 08-12 Suite!"
                 else:
-                    # Fallback to the generic message from /set_time
-                    collection_message = context.bot_data.get(
-                        'collection_time', 
-                        'Ready for collection now. Please check with us for timing.'
-                    )
+                    # Simple default fallback if no time was found in DB
+                    collection_message = "Ready for collection! Please head to 08-12 Suite."
 
                 # 4. Notify the user
                 try:
@@ -584,13 +568,12 @@ class OrderBot:
                         chat_id=user_id_to_notify,
                         text=(
                             "🎉 Your order is ready for collection!\n\n"
-                            f"**Collection Info:**\n{collection_message}" # <-- Use dynamic message
+                            f"**Collection Info:**\n{collection_message}"
                         ),
                         parse_mode=ParseMode.MARKDOWN
                     )
                 except Exception as e:
-                    logger.error(f"Failed to send 'order ready' message to user {user_id_to_notify}: {e}")
-                    # Don't stop, the admin still needs confirmation
+                    logger.error(f"Failed to send 'order ready' message: {e}")
 
                 # 5. Update the admin's message
                 original_text = query.message.text
