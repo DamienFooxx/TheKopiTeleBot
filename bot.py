@@ -125,9 +125,60 @@ class OrderBot:
     # --- Conversation Handler Methods ---
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Starts the conversation and asks for the user's name."""
+        """Starts the conversation, shows available time ranges, and asks for name."""
+        
+        # 1. Get the order windows
+        windows = context.bot_data.get('order_windows')
+        
+        # Backward compatibility (if you haven't run /set_order_window yet)
+        if not windows:
+            start_t = context.bot_data.get('order_window_start')
+            end_t = context.bot_data.get('order_window_end')
+            if start_t and end_t:
+                windows = [(start_t, end_t)]
+        
+        # 2. Prepare the message text
+        if not windows:
+            msg_text = (
+                "Hello! We haven't set our collection times for today yet.\n\n"
+                "Message @DamienFxx for more info."
+            )
+        else:
+            # Filter out windows that are completely in the past to keep it "live"
+            valid_ranges = []
+            now = datetime.datetime.now()
+            
+            for start_str, end_str in windows:
+                try:
+                    # Check if the window's end time has passed
+                    end_time = datetime.datetime.strptime(end_str, "%H:%M").time()
+                    end_dt = datetime.datetime.combine(datetime.date.today(), end_time)
+                    
+                    # Only show the range if it is still valid (ends in the future)
+                    if end_dt > now:
+                        valid_ranges.append(f"{start_str} to {end_str}")
+                except ValueError:
+                    continue
+            
+            if not valid_ranges:
+                msg_text = (
+                    "Hello! All collection windows for today have ended.\n\n"
+                    "How about come back tomorrow!"
+                )
+            else:
+                # Join multiple ranges with a comma and new line
+                ranges_text = ",\n".join(valid_ranges)
+                
+                msg_text = (
+                    f"Hello! Today our collection time is from\n"
+                    f"**{ranges_text}**,\n\n"
+                    f"Can we get your name?"
+                )
+
+        # 3. Send the message
         await update.message.reply_text(
-            "Welcome! Let's take your order. What is your full name?"
+            msg_text,
+            parse_mode=ParseMode.MARKDOWN
         )
         return self.STATE_NAME
 
