@@ -30,23 +30,28 @@ from config import ADMIN_CHAT_ID, MENU
 logger = logging.getLogger(__name__)
 
 def generate_time_slots(start_time_str: str, end_time_str: str) -> list[str]:
-    """Generates 15-minute time slots between a start and end time."""
+    """Generates 15-minute time slots strictly in the future."""
     slots = []
     try:
         start_time = datetime.datetime.strptime(start_time_str, "%H:%M").time()
         end_time = datetime.datetime.strptime(end_time_str, "%H:%M").time()
         
-        current_time = datetime.datetime.combine(datetime.date.today(), start_time)
-        end_datetime = datetime.datetime.combine(datetime.date.today(), end_time)
+        current_date = datetime.date.today()
         
-        # Also check current time to not show past slots
+        # Combine date and time to create comparable datetime objects
+        current_slot = datetime.datetime.combine(current_date, start_time)
+        end_datetime = datetime.datetime.combine(current_date, end_time)
+        
+        # Get exact current time
         now = datetime.datetime.now()
 
-        while current_time <= end_datetime:
-            # Only add the slot if it's in the future
-            if current_time > now:
-                slots.append(current_time.strftime("%H:%M"))
-            current_time += datetime.timedelta(minutes=15)
+        while current_slot <= end_datetime:
+            # STRICT CHECK: Only add the slot if it is in the future
+            if current_slot > now:
+                slots.append(current_slot.strftime("%H:%M"))
+            
+            # Move to next 15 min slot
+            current_slot += datetime.timedelta(minutes=15)
         
         return slots
     except ValueError as e:
@@ -104,6 +109,7 @@ class OrderBot:
                 self.STATE_SET_ORDER_WINDOW_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.receive_order_window)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel_admin_action)],
+            allow_reentry=True,
         )
         self.application.add_handler(set_window_handler)
         
@@ -300,20 +306,72 @@ class OrderBot:
             return self.STATE_TIME_SELECTION
 
     async def time_slot_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles the user pressing a time slot button."""
+        """Handles the user pressing a time slot button with VALIDATION."""
         query = update.callback_query
+        
+        selected_time_str = query.data[len("slot_"):] # e.g., "16:15"
+        
+        # --- VALIDATION: Check if this time has passed ---
+        now = datetime.datetime.now()
+        try:
+            selected_time = datetime.datetime.strptime(selected_time_str, "%H:%M").time()
+            selected_dt = datetime.datetime.combine(datetime.date.today(), selected_time)
+            
+            # If the selected time is in the past (and it's not a midnight edge case)
+            if selected_dt <= now:
+                await query.answer("⚠️ This time slot has passed! Refreshing...", show_alert=True)
+                
+                # --- REGENERATE SLOTS ---
+                windows = context.bot_data.get('order_windows', [])
+                # Backward compatibility
+                if not windows:
+                    start = context.bot_data.get('order_window_start')
+                    end = context.bot_data.get('order_window_end')
+                    if start and end: windows = [(start, end)]
+                
+                all_slots = []
+                for s, e in windows:
+                    all_slots.extend(generate_time_slots(s, e))
+                
+                all_slots = sorted(list(set(all_slots)))
+                
+                if not all_slots:
+                    await query.edit_message_text("Sorry, no more collections for today.")
+                    return ConversationHandler.END
+
+                # Rebuild Keyboard
+                keyboard = []
+                row = []
+                for slot in all_slots:
+                    row.append(InlineKeyboardButton(slot, callback_data=f"slot_{slot}"))
+                    if len(row) == 3:
+                        keyboard.append(row)
+                        row = []
+                if row: keyboard.append(row)
+                
+                await query.edit_message_text(
+                    "⚠️ **That slot just passed.**\n\nPlease select a new time:",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                # Stay in the same state to let them pick again
+                return self.STATE_TIME_SELECTION
+                
+        except ValueError:
+            logger.error("Error parsing selected time slot.")
+            await query.answer("Error validating time.", show_alert=True)
+            return self.STATE_TIME_SELECTION
+
+        # --- IF VALID, PROCEED AS NORMAL ---
         await query.answer()
+        context.user_data['collection_time'] = selected_time_str
         
-        selected_time = query.data[len("slot_"):] # e.g., "16:15"
-        context.user_data['collection_time'] = selected_time
-        
-        # Now, retrieve the stored order info
+        # Retrieve order info
         order_details = context.user_data.get('order', 'No order details')
         total_price = context.user_data.get('total', 0)
         
-        # Build the final payment instructions
         payment_instructions = (
-            f"Thank you! You have selected **{selected_time}** for collection.\n\n"
+            f"Thank you! You have selected **{selected_time_str}** for collection.\n\n"
             f"Your final order is:\n{order_details}\n"
             f"**Total: ${total_price}**\n\n"
             "Please send the payment to:\n"
@@ -322,19 +380,16 @@ class OrderBot:
             "After paying, please send a screenshot of the transaction."
         )
         
-        # Send payment instructions as a NEW message
         await context.bot.send_message(
             chat_id=query.from_user.id,
             text=payment_instructions,
             parse_mode=ParseMode.MARKDOWN
         )
         
-        # Edit the time slot message to clean up
         await query.edit_message_text(
-            f"Time confirmed: **{selected_time}**. \n\nPlease see the message above for payment instructions."
+            f"Time confirmed: **{selected_time_str}**. \n\nPlease see the message above for payment instructions."
         )
         
-        # Transition to the screenshot state
         return self.STATE_SCREENSHOT
 
     async def get_screenshot(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
