@@ -115,9 +115,12 @@ class OrderBot:
         self.application.add_handler(CallbackQueryHandler(
             self.mark_completed_handler, 
             pattern="^complete_",
-            # Note: We can't use self.admin_filter here directly,
-            # but the /orders command that *generates* these
-            # buttons is already admin-only, which provides security.
+        ))
+
+        # --- NEW: Handler for the "Silent Complete" button ---
+        self.application.add_handler(CallbackQueryHandler(
+            self.silent_complete_handler, 
+            pattern="^silent_",
         ))
     # --- Conversation Handler Methods ---
 
@@ -519,12 +522,20 @@ class OrderBot:
                 f"Items:\n{order_details}"
             )
 
-            keyboard = [[
-                InlineKeyboardButton(
-                    "✅ Mark Completed", 
-                    callback_data=f"complete_{order_id}"
-                )
-            ]]
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "✅ Notify & Complete", 
+                        callback_data=f"complete_{order_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🔕 Silent Complete (No Msg)", 
+                        callback_data=f"silent_{order_id}"
+                    )
+                ]
+            ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
@@ -585,6 +596,41 @@ class OrderBot:
                 await query.edit_message_text(f"Error: Failed to update order {order_id} in database.")
         else:
             await query.edit_message_text(f"Error: Could not find user for order {order_id}.")
+
+    async def silent_complete_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handles the admin's 'Silent Complete' button press.
+        Marks the order as completed in the DB but DOES NOT send a message to the user.
+        """
+        query = update.callback_query
+
+        # Security check
+        if query.from_user.id != self.admin_chat_id:
+            await query.answer("This is an admin-only button.", show_alert=True)
+            return
+
+        await query.answer("Silently completing...")
+
+        try:
+            order_id = int(query.data.split("_")[1])
+        except (ValueError, IndexError):
+            await query.edit_message_text("Error: Invalid order ID in callback.")
+            return
+
+        # 1. Mark as completed in the DB (so it vanishes from the list)
+        success = mark_order_completed(order_id)
+
+        if success:
+            # 2. Update the admin's message to show it's done
+            original_text = query.message.text
+            
+            # We strip the buttons and add a note
+            await query.edit_message_text(
+                f"🔕 **SILENTLY COMPLETED**\n{original_text}\n\n(User was NOT notified)",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await query.edit_message_text(f"Error: Failed to update order {order_id} in database.")
     # --- Public Run Method ---
 
     def run(self):
