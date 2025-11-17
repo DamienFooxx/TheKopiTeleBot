@@ -21,7 +21,8 @@ from data_logger import (
     log_order, 
     get_unfulfilled_orders, 
     get_order_info_for_notify,
-    mark_order_completed
+    mark_order_completed,
+    DATABASE_FILE
 )
 from menu_builder import build_menu_message
 from config import ADMIN_CHAT_ID, MENU
@@ -102,6 +103,7 @@ class OrderBot:
         
         self.application.add_handler(conv_handler)
         self.application.add_handler(approval_handler)
+        self.application.add_handler(CommandHandler("export_db", self.export_database, filters=self.admin_filter))
         
         # --- 5. ADD NEW HANDLER for /set_order_window ---
         set_window_handler = ConversationHandler(
@@ -512,6 +514,7 @@ class OrderBot:
         admin_commands = user_commands + [
             BotCommand("orders", "View unfulfilled orders"),
             BotCommand("set_order_window", "Set 15-min collection slots (e.g., 16:00-18:00)"),
+            BotCommand("export_db", "📥 Download Database File"), # <-- Add this
         ]
         
         # --- 4. Set special commands just for your chat ---
@@ -723,6 +726,18 @@ class OrderBot:
             )
         else:
             await query.edit_message_text(f"Error: Failed to update order {order_id} in database.")
+
+    async def export_database(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Sends the current SQLite database file to the admin."""
+        try:
+            await update.message.reply_document(
+                document=open(DATABASE_FILE, 'rb'),
+                filename="orders.db",
+                caption=f"📂 Here is your database backup.\nTime: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to export database: {e}")
+            await update.message.reply_text("❌ Failed to export database file.")
     # --- Public Run Method ---
 
     def run(self):
