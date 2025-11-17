@@ -30,27 +30,28 @@ from config import ADMIN_CHAT_ID, MENU
 logger = logging.getLogger(__name__)
 
 def generate_time_slots(start_time_str: str, end_time_str: str) -> list[str]:
-    """Generates 15-minute time slots strictly in the future."""
+    """Generates 15-minute time slots strictly in the future (SG Time)."""
     slots = []
     try:
+        # 1. Define Singapore Timezone (UTC+8)
+        sg_tz = datetime.timezone(datetime.timedelta(hours=8))
+        
+        # 2. Get current time in SG
+        now_sg = datetime.datetime.now(sg_tz)
+        current_date = now_sg.date() # Important: Use SG date, not server date
+
         start_time = datetime.datetime.strptime(start_time_str, "%H:%M").time()
         end_time = datetime.datetime.strptime(end_time_str, "%H:%M").time()
         
-        current_date = datetime.date.today()
+        # 3. Create timezone-aware datetimes for comparison
+        current_slot = datetime.datetime.combine(current_date, start_time).replace(tzinfo=sg_tz)
+        end_datetime = datetime.datetime.combine(current_date, end_time).replace(tzinfo=sg_tz)
         
-        # Combine date and time to create comparable datetime objects
-        current_slot = datetime.datetime.combine(current_date, start_time)
-        end_datetime = datetime.datetime.combine(current_date, end_time)
-        
-        # Get exact current time
-        now = datetime.datetime.now()
-
         while current_slot <= end_datetime:
-            # STRICT CHECK: Only add the slot if it is in the future
-            if current_slot > now:
+            # STRICT CHECK: Compare SG time vs SG time
+            if current_slot > now_sg:
                 slots.append(current_slot.strftime("%H:%M"))
             
-            # Move to next 15 min slot
             current_slot += datetime.timedelta(minutes=15)
         
         return slots
@@ -131,61 +132,49 @@ class OrderBot:
     # --- Conversation Handler Methods ---
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Starts the conversation, shows available time ranges, and asks for name."""
+        """Starts the conversation, shows available time ranges (SG Time)."""
         
-        # 1. Get the order windows
         windows = context.bot_data.get('order_windows')
         
-        # Backward compatibility (if you haven't run /set_order_window yet)
         if not windows:
             start_t = context.bot_data.get('order_window_start')
             end_t = context.bot_data.get('order_window_end')
             if start_t and end_t:
                 windows = [(start_t, end_t)]
         
-        # 2. Prepare the message text
         if not windows:
-            msg_text = (
-                "Hello! We haven't set our collection times for today yet.\n\n"
-                "Message @DamienFxx for more info."
-            )
+            msg_text = "Hello! We haven't configured our collection times for today yet.\n\nCan we get your name?"
         else:
-            # Filter out windows that are completely in the past to keep it "live"
             valid_ranges = []
-            now = datetime.datetime.now()
+            
+            # 1. Define SG Time
+            sg_tz = datetime.timezone(datetime.timedelta(hours=8))
+            now_sg = datetime.datetime.now(sg_tz)
             
             for start_str, end_str in windows:
                 try:
-                    # Check if the window's end time has passed
                     end_time = datetime.datetime.strptime(end_str, "%H:%M").time()
-                    end_dt = datetime.datetime.combine(datetime.date.today(), end_time)
                     
-                    # Only show the range if it is still valid (ends in the future)
-                    if end_dt > now:
+                    # 2. Make end time aware (SG)
+                    end_dt = datetime.datetime.combine(now_sg.date(), end_time).replace(tzinfo=sg_tz)
+                    
+                    # 3. Compare
+                    if end_dt > now_sg:
                         valid_ranges.append(f"{start_str} to {end_str}")
                 except ValueError:
                     continue
             
             if not valid_ranges:
-                msg_text = (
-                    "Hello! All collection windows for today have ended.\n\n"
-                    "How about come back tomorrow!"
-                )
+                msg_text = "Hello! All collection windows for today have ended.\n\nCan we get your name?"
             else:
-                # Join multiple ranges with a comma and new line
                 ranges_text = ",\n".join(valid_ranges)
-                
                 msg_text = (
                     f"Hello! Today our collection time is from\n"
                     f"**{ranges_text}**,\n\n"
                     f"Can we get your name?"
                 )
 
-        # 3. Send the message
-        await update.message.reply_text(
-            msg_text,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text(msg_text, parse_mode=ParseMode.MARKDOWN)
         return self.STATE_NAME
 
     async def get_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -310,20 +299,23 @@ class OrderBot:
         query = update.callback_query
         
         selected_time_str = query.data[len("slot_"):] # e.g., "16:15"
-        
-        # --- VALIDATION: Check if this time has passed ---
-        now = datetime.datetime.now()
+        # --- VALIDATION: Check if this time has passed (SG Time) ---
+        # 1. Define SG Time
+        sg_tz = datetime.timezone(datetime.timedelta(hours=8))
+        now_sg = datetime.datetime.now(sg_tz)
+
         try:
             selected_time = datetime.datetime.strptime(selected_time_str, "%H:%M").time()
-            selected_dt = datetime.datetime.combine(datetime.date.today(), selected_time)
             
-            # If the selected time is in the past (and it's not a midnight edge case)
-            if selected_dt <= now:
+            # 2. Make selected time aware (assigned to SG zone)
+            selected_dt = datetime.datetime.combine(now_sg.date(), selected_time).replace(tzinfo=sg_tz)
+            
+            # 3. Compare
+            if selected_dt <= now_sg:
                 await query.answer("⚠️ This time slot has passed! Refreshing...", show_alert=True)
                 
-                # --- REGENERATE SLOTS ---
+                # --- REGENERATE SLOTS (Standard logic) ---
                 windows = context.bot_data.get('order_windows', [])
-                # Backward compatibility
                 if not windows:
                     start = context.bot_data.get('order_window_start')
                     end = context.bot_data.get('order_window_end')
@@ -331,15 +323,14 @@ class OrderBot:
                 
                 all_slots = []
                 for s, e in windows:
-                    all_slots.extend(generate_time_slots(s, e))
+                    all_slots.extend(generate_time_slots(s, e)) # This now uses the new SG-aware function
                 
                 all_slots = sorted(list(set(all_slots)))
                 
                 if not all_slots:
-                    await query.edit_message_text("Sorry, no more collections for today.")
+                    await query.edit_message_text("Sorry, all collection slots have passed for today.")
                     return ConversationHandler.END
 
-                # Rebuild Keyboard
                 keyboard = []
                 row = []
                 for slot in all_slots:
@@ -354,7 +345,6 @@ class OrderBot:
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode=ParseMode.MARKDOWN
                 )
-                # Stay in the same state to let them pick again
                 return self.STATE_TIME_SELECTION
                 
         except ValueError:
@@ -385,11 +375,7 @@ class OrderBot:
             text=payment_instructions,
             parse_mode=ParseMode.MARKDOWN
         )
-        
-        await query.edit_message_text(
-            f"Time confirmed: **{selected_time_str}**. \n\nPlease see the message above for payment instructions."
-        )
-        
+
         return self.STATE_SCREENSHOT
 
     async def get_screenshot(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
