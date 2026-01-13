@@ -5,7 +5,7 @@ import logging
 from typing import List, Tuple, Optional
 
 
-DATABASE_FILE = "orders.db"
+DATABASE_FILE = "data/orders.db"
 logger = logging.getLogger(__name__)
 
 def setup_database():
